@@ -678,7 +678,6 @@ public:
         moe_fusion_weights_base_addr moe_fusion_wei_addr;
         memory::ptr input_routing_weights;
         memory::ptr input_router_topk_idx;
-        memory::ptr _expert_index_buffer;
     };
 
     std::vector<std::vector<dnnl_weights>> _dnnl_weights;
@@ -766,6 +765,7 @@ public:
     void on_before_batched_gemv(cldnn::stream& stream,
                                 typed_primitive_inst<moe_3gemm_fused_compressed>& instance,
                                 scratch_buffers& scratch,
+                                memory::ptr& batch_mem_ptr,
                                 size_t topk_count,
                                 bool& needs_fallback) {
         if (!_weight_provider->is_offloaded()) {
@@ -798,7 +798,7 @@ public:
             slots_u32[i] = static_cast<uint32_t>((*lease)[i]);
         }
         _expert_index_buffer->copy_from(stream, slots_u32.data(), 0, 0, topk_bytes, true);
-        scratch._expert_index_buffer = _expert_index_buffer;
+        batch_mem_ptr = _expert_index_buffer;
 
         set_otd_weight_pointers(instance, scratch);
         needs_fallback = false;
@@ -1592,16 +1592,12 @@ public:
         {
             const size_t topk_count = token_num * static_cast<size_t>(max_topk);
             bool needs_fallback = false;
-            on_before_batched_gemv(stream, instance, scratch, topk_count, needs_fallback);
+            on_before_batched_gemv(stream, instance, scratch, batch_mem_ptr, topk_count, needs_fallback);
             if (needs_fallback) {
                 // Cannot fit all experts simultaneously → fall back to per-expert onednn loop
                 instance.output_memory_ptr(0)->fill(stream, 0u);
                 return exec_prefill_onednn(events, stream, instance, scratch);
             }
-        }
-        // OTD hook may have remapped expert IDs into scratch._expert_index_buffer
-        if (scratch._expert_index_buffer) {
-            batch_mem_ptr = scratch._expert_index_buffer;
         }
 
         // gate
